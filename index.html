@@ -1,0 +1,647 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="theme-color" content="#0b0d1e">
+<meta name="color-scheme" content="dark">
+<meta name="description" content="Santa's Elf Strike: ten-pin bowling against a rack of wisecracking elves. One or two players.">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-192.png">
+<title>Santa's Elf Strike</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
+<style>
+/* Layout: one letterboxed game canvas over a dark winter-night ground; touch buttons float in the bottom corners on phones */
+:root{
+  --bg:#0b0d1e; --fg:#f4f1e8; --btn:rgba(255,255,255,.14); --btn-on:rgba(255,80,80,.45); --btn-line:rgba(255,255,255,.4);
+  --font-pixel:'Press Start 2P','Courier New',monospace;
+  color-scheme:dark;
+}
+html,body{height:100%}
+body{background:var(--bg);color:var(--fg);margin:0;overflow:hidden;font-family:var(--font-pixel);-webkit-user-select:none;user-select:none;touch-action:none}
+#app{position:fixed;inset:0;display:grid;place-items:center;padding:env(safe-area-inset-top,0px) env(safe-area-inset-right,0px) env(safe-area-inset-bottom,0px) env(safe-area-inset-left,0px)}
+#cv{display:block;image-rendering:pixelated;image-rendering:crisp-edges;background:#000;box-shadow:0 0 0 2px #2a1a1a,0 10px 40px rgba(0,0,0,.6)}
+#touch{position:fixed;inset:0;pointer-events:none}
+#touch[hidden]{display:none}
+.tb{position:absolute;pointer-events:auto;width:min(16vh,84px);height:min(16vh,84px);border-radius:50%;border:2px solid var(--btn-line);background:var(--btn);
+  color:#fff;font:700 min(4vh,20px)/1 var(--font-pixel);display:grid;place-items:center;touch-action:none;-webkit-tap-highlight-color:transparent}
+.tb.on{background:var(--btn-on);border-color:#ff5050}
+#tL{left:calc(12px + env(safe-area-inset-left,0px));bottom:calc(12px + env(safe-area-inset-bottom,0px))}
+#tR{left:calc(24px + min(16vh,84px) + env(safe-area-inset-left,0px));bottom:calc(12px + env(safe-area-inset-bottom,0px))}
+#tA{right:calc(12px + env(safe-area-inset-right,0px));bottom:calc(12px + env(safe-area-inset-bottom,0px));width:min(20vh,104px);height:min(20vh,104px);font-size:min(2.6vh,13px)}
+#tM{right:calc(10px + env(safe-area-inset-right,0px));top:calc(10px + env(safe-area-inset-top,0px));width:46px;height:46px;border-radius:12px;font-size:12px}
+</style>
+
+</head>
+<body>
+<div id="app"><canvas id="cv" aria-label="Santa's Elf Strike bowling game"></canvas></div>
+<div id="touch" hidden>
+  <button class="tb" id="tL" data-k="left" aria-label="Move left">◀</button>
+  <button class="tb" id="tR" data-k="right" aria-label="Move right">▶</button>
+  <button class="tb" id="tA" data-k="act" aria-label="Bowl">BOWL</button>
+  <button class="tb" id="tM" data-k="mute" aria-label="Music and sound">♪</button>
+</div>
+
+<script>
+(function(){
+"use strict";
+/* =========================================================================
+   Santa's Elf Strike — ten-pin bowling against a rack of wisecracking elves
+   ========================================================================= */
+const VW=480, VH=360;
+const cv=document.getElementById('cv'), cx=cv.getContext('2d');
+const lo=document.createElement('canvas'); lo.width=VW; lo.height=VH; const g=lo.getContext('2d');
+let SC=1;
+const SAVE='ses.v1';
+const rnd=(a,b)=>a+Math.random()*(b-a);
+const pick=a=>a[(Math.random()*a.length)|0];
+const clamp=(v,a,b)=>v<a?a:v>b?b:v;
+
+/* ---------------- lane geometry (metres) and projection ---------------- */
+const L=18.29, HW=0.527, GUT=0.12, PIT=L+0.95, NEAR=-2.2, BALL_R=0.108, PIN_R=0.068;
+const D=14.8, S0=4080, KY=4805, HOR=-1;
+const sAt=z=>S0/(z+D);                       // pixels per metre at depth z
+const ZK=L-0.55, LIFT=30;                     // the pin deck tilts up like a little stage so every elf is visible
+const yAt=z=>HOR+KY/(z+D)-Math.max(0,z-ZK)*LIFT; // screen y of the floor at depth z
+const X=(x,z)=>VW/2+x*sAt(z);
+const RACK=[[0,0],[-1,1],[1,1],[-2,2],[0,2],[2,2],[-3,3],[-1,3],[1,3],[3,3]].map(([c,r])=>({x:c*0.1524,z:L+r*0.2639}));
+
+/* ---------------- state ---------------- */
+let state='title', t=0, players=[], cur=0, frameNo=0, ballNo=0, pins=[], ball=null, santaX=0, aim=0, power=0, spin=0, phaseT=0;
+let bubble=null, banner=null, flash=0, snow=[], sparks=[], nPlayers=1, rollStartStanding=0, rollT=0, toast=null;
+let save={best:0,mode:0}; try{ Object.assign(save,JSON.parse(localStorage.getItem(SAVE)||'{}')); }catch(e){}
+const persist=()=>{ try{ localStorage.setItem(SAVE,JSON.stringify(save)); }catch(e){} };
+for(let i=0;i<70;i++) snow.push({x:Math.random()*VW,y:Math.random()*VH,v:rnd(0.2,0.7),w:rnd(0,6)});
+
+const ELF_NAMES=['Pip','Twinkle','Sprocket','Jingle','Noodle','Biscuit','Fizz','Tinsel','Wobble','Gumdrop'];
+const HATS=['#e02828','#1c9e3a','#e02828','#2a6cd8','#e02828','#1c9e3a','#9a2ad8','#e02828','#1c9e3a','#e0a020'];
+function rack(){ pins=RACK.map((p,i)=>({i,x:p.x,z:p.z,x0:p.x,z0:p.z,vx:0,vz:0,up:true,h:0,vh:0,rot:0,vr:0,gone:false,hat:HATS[i],name:ELF_NAMES[i],fidget:Math.random()*100})); }
+rack();
+
+/* ---------------- taunts (all original) ---------------- */
+const SAY={
+  idle:["Roll it already! My cocoa's getting cold!","Come on, Big Guy, we haven't got all winter!","Ten elves, one ball. We like our odds.","Psst. Aim for the elf with the GREEN hat. Kidding!","Is that a bowling ball or a giant meatball?","We're on strike! Get it? Because... bowling!","Mind the elf-esteem, Jolly!"],
+  gutter:["Gutter ball! Ho ho HO-pe you do better!","Did you leave your glasses on the sleigh?","Even Rudolph bowls straighter than that!","Hey Big Guy! The lane is THIS way!","Is that a bowling ball or a lump of coal?","Wheee, the gutter express!"],
+  few:["Missed me! Nyah nyah!","Too many cookies, Santa?","Ha! Still standing!","Was that a roll or a sneeze?","Is that all you've got, Jolly?","Brrr, was that a breeze?"],
+  some:["Hey! Watch the hat!","Okay, that tickled.","Lucky bounce, Big Belly!","Ow! I just ironed this tunic!","Not bad... for a guy in a velvet suit."],
+  strike:["STRIIIKE! Who turned off gravity?!","Wheee! I can see the workshop from up here!","I'm telling Mrs. Claus!","Ho ho OW!","My candy cane! MY CANDY CANE!","Somebody call the elf-ambulance!"],
+  spare:["A spare?! We were just warming up!","Lucky shot, Jolly!","Okay, okay... nice one.","Fine. FINE. Spare. Happy now?"],
+};
+const SAY_MRS={idle:["Come on, Mrs. C, show the big guy how it's done!","Uh oh, she's got that look in her eye..."]};
+
+/* ---------------- audio: PC-speaker style ---------------- */
+let AC=null, soundMode=+save.mode||0;
+function audio(){ if(!AC){ try{ AC=new (window.AudioContext||window.webkitAudioContext)(); }catch(e){} } if(AC&&AC.state==='suspended') AC.resume(); }
+function tone(f1,f2,dur,type='square',vol=0.07,delay=0){
+  if(!AC||soundMode===2) return; const t0=AC.currentTime+delay, o=AC.createOscillator(), v=AC.createGain();
+  o.type=type; o.frequency.setValueAtTime(f1,t0); if(f2) o.frequency.exponentialRampToValueAtTime(f2,t0+dur);
+  v.gain.setValueAtTime(vol,t0); v.gain.exponentialRampToValueAtTime(0.0001,t0+dur); o.connect(v).connect(AC.destination); o.start(t0); o.stop(t0+dur+0.02);
+}
+function noise(dur,vol=0.15,freq=1200){ if(!AC||soundMode===2) return; const n=Math.floor(AC.sampleRate*dur), b=AC.createBuffer(1,n,AC.sampleRate), d=b.getChannelData(0); for(let i=0;i<n;i++) d[i]=(Math.random()*2-1)*Math.pow(1-i/n,2); const s=AC.createBufferSource(), v=AC.createGain(), f=AC.createBiquadFilter(); f.type='bandpass'; f.frequency.value=freq; s.buffer=b; v.gain.value=vol; s.connect(f).connect(v).connect(AC.destination); s.start(); }
+let rumble=null;
+function startRumble(){ if(!AC||soundMode===2||rumble) return; const n=AC.sampleRate*2, b=AC.createBuffer(1,n,AC.sampleRate), d=b.getChannelData(0); for(let i=0;i<n;i++) d[i]=Math.random()*2-1; const s=AC.createBufferSource(), f=AC.createBiquadFilter(), v=AC.createGain(); s.buffer=b; s.loop=true; f.type='lowpass'; f.frequency.value=180; v.gain.value=0.0; s.connect(f).connect(v).connect(AC.destination); s.start(); rumble={s,v}; }
+function setRumble(vol){ if(rumble) rumble.v.gain.setTargetAtTime(vol,AC.currentTime,0.05); }
+function stopRumble(){ if(rumble){ try{ rumble.v.gain.setTargetAtTime(0,AC.currentTime,0.05); const r=rumble; setTimeout(()=>{ try{ r.s.stop(); }catch(e){} },300); }catch(e){} rumble=null; } }
+const SFX={
+  click:()=>tone(880,0,0.04,'square',0.05), lock:()=>tone(660,990,0.07),
+  throw:()=>{ tone(200,90,0.18,'triangle',0.12); },
+  crash:(n)=>{ noise(0.35,0.22,1600); for(let i=0;i<Math.min(6,n);i++) tone(rnd(900,1500),rnd(500,700),0.05,'square',0.04,i*0.03); },
+  yelp:()=>tone(rnd(700,1000),rnd(1400,2000),0.12,'sine',0.08),
+  gutter:()=>[392,370,349,330].forEach((f,i)=>tone(f,f*0.97,0.32,'sawtooth',0.06,i*0.3)),
+  strike:()=>[523,659,784,1047,784,1047].forEach((f,i)=>tone(f,0,0.12,'square',0.07,i*0.09)),
+  spare:()=>[659,784,988].forEach((f,i)=>tone(f,0,0.1,'square',0.07,i*0.09)),
+  jingle:()=>{ for(let i=0;i<6;i++) tone(rnd(2200,3200),0,0.06,'triangle',0.03,i*0.05); },
+};
+const sfx=(n,a)=>{ try{ SFX[n]&&SFX[n](a); }catch(e){} };
+
+/* music: public-domain carols as chiptune loops */
+const TUNES={
+  jingle:{bpm:132,lead:"E5:2 E5:2 E5:4 | E5:2 E5:2 E5:4 | E5:2 G5:2 C5:3 D5:1 | E5:8 | F5:2 F5:2 F5:3 F5:1 | F5:2 E5:2 E5:2 E5:1 E5:1 | E5:2 D5:2 D5:2 E5:2 | D5:4 G5:4 | E5:2 E5:2 E5:4 | E5:2 E5:2 E5:4 | E5:2 G5:2 C5:3 D5:1 | E5:8 | F5:2 F5:2 F5:3 F5:1 | F5:2 E5:2 E5:2 E5:1 E5:1 | G5:2 G5:2 F5:2 D5:2 | C5:8",
+    bass:"C3:4 G2:4 | C3:4 G2:4 | C3:4 G2:4 | C3:4 E3:4 | F2:4 C3:4 | C3:4 G2:4 | D3:4 A2:4 | G2:4 B2:4 | C3:4 G2:4 | C3:4 G2:4 | C3:4 G2:4 | C3:4 E3:4 | F2:4 C3:4 | C3:4 G2:4 | G2:4 G2:4 | C3:4 C3:4"},
+  wish:{bpm:150,lead:"G4:2 | C5:2 C5:1 D5:1 C5:1 B4:1 | A4:2 A4:2 A4:2 | D5:2 D5:1 E5:1 D5:1 C5:1 | B4:2 G4:2 G4:2 | E5:2 E5:1 F5:1 E5:1 D5:1 | C5:2 A4:2 G4:1 G4:1 | A4:2 D5:2 B4:2 | C5:4 R:2",
+    bass:"R:2 | C3:2 G2:2 C3:2 | F2:2 C3:2 F2:2 | D3:2 A2:2 D3:2 | G2:2 D3:2 G2:2 | E3:2 B2:2 E3:2 | F2:2 C3:2 F2:2 | G2:2 G2:2 G2:2 | C3:4 R:2",beats:3},
+};
+const NOTE_I={C:0,D:2,E:4,F:5,G:7,A:9,B:11};
+function noteFreq(n){ const m=/^([A-G])([#b]?)(\d)$/.exec(n); if(!m) return 0; const i=NOTE_I[m[1]]+(m[2]==='#'?1:m[2]==='b'?-1:0); return 440*Math.pow(2,(12*(+m[3]+1)+i-69)/12); }
+function parseSeq(str){ const out=[]; let pos=0; for(const tok of str.split(/[\s|]+/)){ if(!tok) continue; const [n,l]=tok.split(':'); const len=+l||2; out.push({f:n==='R'?0:noteFreq(n),at:pos,len}); pos+=len; } return {notes:out,len:pos}; }
+for(const k in TUNES){ TUNES[k].Ls=parseSeq(TUNES[k].lead); TUNES[k].Bs=parseSeq(TUNES[k].bass); }
+let music={name:null,next:0,timer:null,gain:null};
+function mgain(){ if(!music.gain&&AC){ music.gain=AC.createGain(); music.gain.gain.value=0.5; music.gain.connect(AC.destination); } return music.gain; }
+function pnote(f,t0,dur,type,vol){ if(!f) return; const o=AC.createOscillator(), v=AC.createGain(); o.type=type; o.frequency.setValueAtTime(f,t0); v.gain.setValueAtTime(0.0001,t0); v.gain.linearRampToValueAtTime(vol,t0+0.008); v.gain.setValueAtTime(vol,t0+Math.max(0.01,dur*0.7)); v.gain.exponentialRampToValueAtTime(0.0001,t0+dur); o.connect(v).connect(mgain()); o.start(t0); o.stop(t0+dur+0.03); }
+function schedule(){
+  const tn=TUNES[music.name]; if(!tn||!AC) return; const step=60/tn.bpm/2;   // one unit = an eighth note
+  while(music.next<AC.currentTime+0.3){
+    const st=music.next;
+    for(const n of tn.Ls.notes) pnote(n.f,st+n.at*step,n.len*step*0.9,'square',0.04);
+    for(const n of tn.Bs.notes) pnote(n.f,st+n.at*step,n.len*step*0.8,'triangle',0.085);
+    for(let b=0;b<tn.Ls.len;b+=2) pnote(rnd(2400,3000),st+b*step,0.03,'triangle',0.012);  // sleigh bells
+    music.next+=tn.Ls.len*step;
+  }
+}
+function setMusic(name){
+  if(soundMode!==0) name=null;
+  if(music.name===name&&(!name||music.timer)) return;
+  if(music.gain){ const o=music.gain; try{ o.gain.setTargetAtTime(0,AC.currentTime,0.05); setTimeout(()=>o.disconnect(),400); }catch(e){} music.gain=null; }
+  clearInterval(music.timer); music.timer=null; music.name=name;
+  if(!name||!AC) return; music.next=AC.currentTime+0.1; schedule(); music.timer=setInterval(schedule,70);
+}
+function cycleSound(){ soundMode=(soundMode+1)%3; save.mode=soundMode; persist(); toast={msg:['MUSIC + SOUND','SOUND ONLY','QUIET'][soundMode],until:t+90}; music.name=null; if(soundMode===2) stopRumble(); }
+
+/* ---------------- input ---------------- */
+const down={}, hit=new Set();
+const KEYS={ArrowLeft:'left',a:'left',A:'left',ArrowRight:'right',d:'right',D:'right',' ':'act',Enter:'act',ArrowUp:'act',m:'mute',M:'mute',Escape:'menu'};
+addEventListener('keydown',e=>{ const k=KEYS[e.key]; if(!k) return; e.preventDefault(); audio(); if(!e.repeat) hit.add(k); down[k]=true; });
+addEventListener('keyup',e=>{ const k=KEYS[e.key]; if(k) down[k]=false; });
+addEventListener('blur',()=>{ for(const k in down) down[k]=false; });
+const touchEl=document.getElementById('touch');
+const coarse=matchMedia('(pointer: coarse)').matches||'ontouchstart' in window;
+if(coarse) touchEl.hidden=false;
+touchEl.querySelectorAll('.tb').forEach(b=>{
+  const k=b.dataset.k;
+  b.addEventListener('pointerdown',e=>{ e.preventDefault(); e.stopPropagation(); audio(); try{ b.setPointerCapture(e.pointerId); }catch(_){} down[k]=true; hit.add(k); b.classList.add('on'); });
+  const off=()=>{ down[k]=false; b.classList.remove('on'); };
+  b.addEventListener('pointerup',off); b.addEventListener('pointercancel',off); b.addEventListener('lostpointercapture',off);
+});
+// drag on the lane to move Santa, tap to act
+let drag=null;
+cv.addEventListener('pointerdown',e=>{ audio(); const r=cv.getBoundingClientRect(); drag={x0:e.clientX,sx:santaX,moved:false,w:r.width,id:e.pointerId}; try{ cv.setPointerCapture(e.pointerId); }catch(_){} });
+cv.addEventListener('pointermove',e=>{ if(!drag||state!=='position') return; const dx=(e.clientX-drag.x0)/drag.w*VW; if(Math.abs(dx)>6) drag.moved=true; if(drag.moved) santaX=clamp(drag.sx+dx/sAt(0),-HW+0.12,HW-0.12); });
+cv.addEventListener('pointerup',e=>{ if(drag&&!drag.moved){ const r=cv.getBoundingClientRect(); const vx=(e.clientX-r.left)/r.width*VW, vy=(e.clientY-r.top)/r.height*VH; tapAt={x:vx,y:vy}; hit.add('act'); } drag=null; });
+let tapAt=null;
+
+/* ---------------- scoring ---------------- */
+function frames(rolls){
+  // returns array of 10 frames {balls:[..], score:cumulative|null}
+  const out=[]; let i=0, total=0;
+  for(let f=0;f<10;f++){
+    const fr={balls:[],score:null};
+    if(f<9){
+      if(i>=rolls.length){ out.push(fr); continue; }
+      if(rolls[i]===10){ fr.balls=[10]; if(rolls[i+2]!==undefined){ total+=10+rolls[i+1]+rolls[i+2]; fr.score=total; } i+=1; }
+      else { fr.balls=[rolls[i]]; if(rolls[i+1]!==undefined){ fr.balls.push(rolls[i+1]); if(rolls[i]+rolls[i+1]===10){ if(rolls[i+2]!==undefined){ total+=10+rolls[i+2]; fr.score=total; } } else { total+=rolls[i]+rolls[i+1]; fr.score=total; } } i+=2; }
+    } else {
+      fr.balls=rolls.slice(i,i+3);
+      const b=fr.balls; const done=b.length===3||(b.length===2&&b[0]+b[1]<10);
+      if(done){ total+=b.reduce((a,c)=>a+c,0); fr.score=total; }
+    }
+    out.push(fr);
+  }
+  return out;
+}
+const totalOf=rolls=>{ const fr=frames(rolls); let s=0; for(const f of fr) if(f.score!==null) s=f.score; return s; };
+function frameMarks(fr,f){
+  // scoresheet symbols for one frame
+  const b=fr.balls, m=[];
+  if(f<9){ if(b[0]===10) return ['','X']; if(b.length) m.push(b[0]===0?'-':String(b[0])); if(b.length>1) m.push(b[0]+b[1]===10?'/':b[1]===0?'-':String(b[1])); return m; }
+  let first=true, prev=0;
+  for(const v of b){ if(first){ if(v===10) m.push('X'); else { m.push(v===0?'-':String(v)); prev=v; first=false; } } else { m.push(prev+v===10?'/':v===0?'-':String(v)); first=true; } }
+  return m;
+}
+
+/* ---------------- game flow ---------------- */
+function newGame(n){
+  nPlayers=n; players=[{name:'SANTA',rolls:[],suit:'#d42020'}]; if(n===2) players.push({name:'MRS. CLAUS',rolls:[],suit:'#c41870'});
+  cur=0; frameNo=0; ballNo=0; rack(); startTurn(); state='position'; setMusic('jingle');
+}
+function startTurn(){ santaX=0; aim=0; power=0; spin=0; ball=null; phaseT=0; if(Math.random()<0.55) say(pick(players[cur].name==='MRS. CLAUS'&&Math.random()<0.5?SAY_MRS.idle:SAY.idle),140); }
+function say(msg,dur){ const stand=pins.filter(p=>p.up&&!p.gone); const p=stand.length?pick(stand):pins[0]; bubble={pin:p,msg,until:t+(dur||170)}; sfx('yelp'); }
+function standingCount(){ return pins.filter(p=>p.up&&!p.gone).length; }
+function throwBall(){
+  const speed=6.2+power*3.4;
+  ball={x:clamp(santaX+0.1,-HW+0.15,HW-0.15),z:0,vx:Math.sin(aim)*speed,vz:Math.cos(aim)*speed,spin:spin,rot:0,gutter:false,done:false,pinT:0};
+  rollStartStanding=standingCount(); rollT=0; state='rolling'; sfx('throw'); startRumble();
+}
+function endRoll(){
+  stopRumble();
+  const knocked=rollStartStanding-standingCount();
+  const P=players[cur]; P.rolls.push(knocked);
+  const left=standingCount();
+  const firstOfFrame=ballNo===0||(frameNo===9&&isFreshRack);
+  let mood;
+  if(ball&&ball.gutter&&knocked===0) mood='gutter';
+  else if(left===0&&firstOfFrame) mood='strike';
+  else if(left===0) mood='spare';
+  else if(knocked<=2) mood='few';
+  else mood='some';
+  if(mood==='strike'){ banner={txt:'STRIKE!',c:'#ffdd33',until:t+120}; sfx('strike'); burstConfetti(); }
+  else if(mood==='spare'){ banner={txt:'SPARE!',c:'#55ffff',until:t+110}; sfx('spare'); }
+  else if(mood==='gutter'){ banner={txt:'GUTTER BALL',c:'#ff7070',until:t+110}; sfx('gutter'); }
+  else banner={txt:knocked+(knocked===1?' ELF':' ELVES'),c:'#ffffff',until:t+90};
+  setTimeout(()=>say(pick(SAY[mood]),180),450);
+  state='result'; phaseT=0;
+  lastMood=mood;
+}
+let isFreshRack=true, lastMood='';
+function advance(){
+  // decide what happens after the result screen
+  const P=players[cur];
+  const fr=frames(P.rolls)[frameNo];
+  let frameDone=false, resetRack=false;
+  if(frameNo<9){
+    if(ballNo===0&&P.rolls[P.rolls.length-1]===10) frameDone=true;
+    else if(ballNo===1) frameDone=true;
+  } else {
+    const b=fr.balls;
+    if(b.length===3||(b.length===2&&b[0]+b[1]<10)) frameDone=true;
+    else if(standingCount()===0) resetRack=true;
+  }
+  // sweep fallen elves
+  pins.forEach(p=>{ if(!p.up) p.gone=true; });
+  if(frameDone){
+    ballNo=0; isFreshRack=true; rack();
+    if(cur<players.length-1) cur++; else { cur=0; frameNo++; }
+    if(frameNo>=10){ endGame(); return; }
+  } else {
+    ballNo++;
+    if(resetRack){ rack(); isFreshRack=true; } else isFreshRack=false;
+  }
+  startTurn(); state='position';
+}
+function endGame(){
+  state='gameover'; phaseT=0; setMusic('wish');
+  const best=Math.max(...players.map(p=>totalOf(p.rolls)));
+  if(best>save.best){ save.best=best; persist(); }
+}
+
+/* ---------------- physics ---------------- */
+function physics(dt){
+  if(ball&&!ball.done){
+    // the ball hooks in the back end of the lane where it is dry
+    if(!ball.gutter&&ball.z>6) ball.vx+=ball.spin*0.42*dt;
+    ball.x+=ball.vx*dt; ball.z+=ball.vz*dt; ball.rot+=ball.vz*dt*3;
+    if(!ball.gutter&&Math.abs(ball.x)>HW-BALL_R*0.35){ ball.gutter=true; ball.x=Math.sign(ball.x)*(HW+GUT*0.45); ball.vx=0; sfx('click'); }
+    if(ball.z>PIT){ ball.done=true; }
+  }
+  for(const p of pins){
+    if(p.gone) continue;
+    p.x+=p.vx*dt; p.z+=p.vz*dt;
+    const sp=Math.hypot(p.vx,p.vz);
+    if(sp>0){ const f=Math.max(0,sp-(p.up?6:2.6)*dt)/sp; p.vx*=f; p.vz*=f; }
+    if(p.h>0||p.vh!==0){ p.vh-=9.8*dt; p.h+=p.vh*dt; if(p.h<=0){ p.h=0; p.vh=p.vh<-1.2?-p.vh*0.3:0; } }
+    p.rot+=p.vr*dt; p.vr*=1-1.5*dt;
+    if(p.up&&Math.hypot(p.x-p.x0,p.z-p.z0)>0.045) topple(p,sp);
+    if(Math.abs(p.x)>HW+0.05||p.z>PIT+0.1){ if(p.up) topple(p,sp); if(p.z>PIT+0.4||Math.abs(p.x)>HW+GUT+0.2) p.gone=true; }
+  }
+  // collisions: ball with elves
+  if(ball&&!ball.done&&!ball.gutter){
+    for(const p of pins){ if(p.gone||p.h>0.3) continue; collide(ball,p,7,1.5,BALL_R+(p.up?PIN_R:0.105)); }
+  }
+  for(let i=0;i<pins.length;i++) for(let j=i+1;j<pins.length;j++){
+    const a=pins[i], b=pins[j]; if(a.gone||b.gone||Math.abs(a.h-b.h)>0.3) continue; collide(a,b,1.5,1.5,(a.up?PIN_R:0.105)+(b.up?PIN_R:0.105));
+  }
+}
+function collide(a,b,ma,mb,minD){
+  const dx=b.x-a.x, dz=b.z-a.z, d=Math.hypot(dx,dz);
+  if(d>=minD||d===0) return;
+  const nx=dx/d, nz=dz/d, overlap=minD-d;
+  const tot=ma+mb; a.x-=nx*overlap*mb/tot; a.z-=nz*overlap*mb/tot; b.x+=nx*overlap*ma/tot; b.z+=nz*overlap*ma/tot;
+  const rv=(b.vx-a.vx)*nx+(b.vz-a.vz)*nz; if(rv>0) return;
+  const e=0.55, j=-(1+e)*rv/(1/ma+1/mb);
+  a.vx-=j*nx/ma; a.vz-=j*nz/ma; b.vx+=j*nx/mb; b.vz+=j*nz/mb;
+  // a bit of random scatter so racks don't fall identically
+  b.vx+=rnd(-0.25,0.25)*Math.min(1,Math.abs(j)/4);
+  const imp=Math.abs(j)/mb;
+  if(b.up&&imp>0.15) topple(b,imp);
+  if(a.up!==undefined&&a.up&&imp>0.15) topple(a,imp);
+  if(imp>0.4) sfx('crash',2);
+}
+function topple(p,sp){
+  if(!p.up) return; p.up=false;
+  const s=Math.max(1.2,Math.min(4.5,sp||2));
+  p.vh=s*0.75; p.h=0.01; p.vr=(Math.random()<0.5?-1:1)*rnd(6,14);
+  if(Math.random()<0.5) setTimeout(()=>sfx('yelp'),Math.random()*200);
+  for(let i=0;i<6;i++) sparks.push({x:p.x,z:p.z,h:0.35,vx:rnd(-1,1),vz:rnd(-1,1),vh:rnd(1,3),life:40,c:pick(['#ffffff','#ffdd33','#55ff88'])});
+}
+function burstConfetti(){ for(let i=0;i<70;i++) sparks.push({x:rnd(-0.6,0.6),z:L+rnd(-0.2,1),h:rnd(0.2,0.8),vx:rnd(-1.5,1.5),vz:rnd(-1,1),vh:rnd(2,5),life:rnd(60,110),c:pick(['#ff4040','#40ff70','#ffdd33','#55ffff','#ffffff'])}); }
+
+/* ---------------- update ---------------- */
+function step(){
+  t++; phaseT++;
+  if(hit.has('mute')) cycleSound();
+  if(AC&&!document.hidden){ const want=state==='title'?'jingle':(state==='gameover'?'wish':(state==='position'||state==='aim'||state==='power'||state==='spin'||state==='rolling'||state==='result')?'jingle':null); setMusic(want); }
+  for(const s of snow){ s.y+=s.v; s.x+=Math.sin((t+s.w*50)/40)*0.2; if(s.y>VH){ s.y=-2; s.x=Math.random()*VW; } }
+  for(const s of sparks){ s.x+=s.vx/60; s.z+=s.vz/60; s.vh-=9.8/60; s.h+=s.vh/60; if(s.h<0){ s.h=0; s.vh*=-0.3; } s.life--; }
+  sparks=sparks.filter(s=>s.life>0);
+  for(const p of pins) p.fidget+=0.05;
+  switch(state){
+    case 'title':
+      if(hit.has('left')||hit.has('right')){ nPlayers=nPlayers===1?2:1; sfx('click'); }
+      if(tapAt){ if(tapAt.y>150&&tapAt.y<200){ nPlayers=tapAt.x<VW/2?1:2; } }
+      if(hit.has('act')){ newGame(nPlayers); sfx('jingle'); }
+      break;
+    case 'position':
+      if(down.left) santaX=Math.max(-HW+0.12,santaX-0.012);
+      if(down.right) santaX=Math.min(HW-0.12,santaX+0.012);
+      if(hit.has('act')){ state='aim'; phaseT=0; sfx('lock'); }
+      break;
+    case 'aim': aim=Math.sin(phaseT*0.045)*0.032; if(hit.has('act')){ state='power'; phaseT=0; sfx('lock'); } break;
+    case 'power': power=(1-Math.cos(phaseT*0.06))/2; if(hit.has('act')){ state='spin'; phaseT=0; sfx('lock'); } break;
+    case 'spin': spin=Math.sin(phaseT*0.07); if(hit.has('act')){ sfx('lock'); throwBall(); } break;
+    case 'rolling':
+      rollT++;
+      for(let k=0;k<6;k++) physics(1/360);
+      if(ball&&!ball.done) setRumble(ball.gutter?0.18:0.32); else setRumble(0);
+      if(ball&&ball.z>L-0.4&&!ball.crashed&&!ball.gutter){ ball.crashed=true; const n=pins.filter(p=>!p.up).length; sfx('crash',6); }
+      { const moving=pins.some(p=>!p.gone&&(Math.hypot(p.vx,p.vz)>0.05||p.h>0)); if((ball.done&&!moving&&rollT>30)||rollT>600) endRoll(); }
+      break;
+    case 'result':
+      for(let k=0;k<6;k++) physics(1/360);
+      if(phaseT>150||(phaseT>40&&hit.has('act'))) advance();
+      break;
+    case 'gameover':
+      if(phaseT>60&&hit.has('act')){ state='title'; setMusic('jingle'); }
+      break;
+  }
+  hit.clear(); tapAt=null;
+}
+
+/* ---------------- drawing helpers ---------------- */
+function poly(pts,c){ g.fillStyle=c; g.beginPath(); g.moveTo(pts[0][0],pts[0][1]); for(let i=1;i<pts.length;i++) g.lineTo(pts[i][0],pts[i][1]); g.closePath(); g.fill(); }
+function circ(x,y,r,c){ g.fillStyle=c; g.beginPath(); g.arc(x,y,Math.max(0.5,r),0,Math.PI*2); g.fill(); }
+function rect(x,y,w,h,c){ g.fillStyle=c; g.fillRect(Math.round(x),Math.round(y),Math.round(w),Math.round(h)); }
+const LANE_Y_FAR=yAt(PIT);
+
+function drawRoom(){
+  // workshop wall above the lane, with windows onto falling snow
+  const gr=g.createLinearGradient(0,0,0,VH); gr.addColorStop(0,'#3a1f12'); gr.addColorStop(1,'#1f120a'); g.fillStyle=gr; g.fillRect(0,0,VW,VH);
+  for(let x=0;x<VW;x+=24){ rect(x,40,1,LANE_Y_FAR,'#2a160c'); }
+  // windows
+  for(const wx of [28,VW-108]){
+    rect(wx-4,48,88,62,'#5a3418'); rect(wx,52,80,54,'#0e1640');
+    g.save(); g.beginPath(); g.rect(wx,52,80,54); g.clip();
+    for(const s of snow){ rect(wx+(s.x%80),52+(s.y%54),1.5,1.5,'#ffffff'); }
+    rect(wx,96,80,10,'#e8eef8'); g.restore();
+    rect(wx+39,52,2,54,'#5a3418'); rect(wx,78,80,2,'#5a3418');
+  }
+  // garland with twinkling lights
+  for(let x=0;x<VW;x+=6){ const y=44+Math.sin(x/38)*5; rect(x,y,7,4,'#1c6e2c'); }
+  for(let k=0;k<26;k++){ const x=k*19+6, y=48+Math.sin(x/38)*5; const on=((t>>4)+k)%3; rect(x,y,3,4,['#ff4040','#ffdd33','#55aaff','#55ff88'][(k+on)%4]); }
+  // back of the lane: curtain over the pit with a sign
+  const fy=yAt(PIT), fxL=X(-HW-GUT-0.25,PIT), fxR=X(HW+GUT+0.25,PIT);
+  rect(fxL,fy-70,fxR-fxL,72,'#7a1010'); for(let x=fxL;x<fxR;x+=8) rect(x,fy-70,3,72,'#661010');
+
+}
+function quad(x0,x1,z0,z1,c){
+  const zs=[z0]; if(z0<ZK&&z1>ZK) zs.push(ZK); zs.push(z1);
+  const pts=[]; for(const z of zs) pts.push([X(x0,z),yAt(z)]); for(const z of zs.slice().reverse()) pts.push([X(x1,z),yAt(z)]);
+  poly(pts,c);
+}
+function line3(x,z0,z1){ g.beginPath(); g.moveTo(X(x,z0),yAt(z0)); if(z0<ZK&&z1>ZK) g.lineTo(X(x,ZK),yAt(ZK)); g.lineTo(X(x,z1),yAt(z1)); g.stroke(); }
+function drawLane(){
+  const zs=[NEAR,0,L-0.3,PIT];
+  // gutters and kickbacks
+  quad(-HW-GUT,-HW,NEAR,PIT,'#2a2a33'); quad(HW,HW+GUT,NEAR,PIT,'#2a2a33');
+  quad(-HW-GUT-0.25,-HW-GUT,NEAR,PIT,'#5a2a14'); quad(HW+GUT,HW+GUT+0.25,NEAR,PIT,'#5a2a14');
+  // maple boards
+  const lg=g.createLinearGradient(0,yAt(PIT),0,yAt(NEAR)); lg.addColorStop(0,'#c99a5a'); lg.addColorStop(1,'#e8c48a');
+  quad(-HW,HW,NEAR,PIT,lg);
+  g.strokeStyle='rgba(120,70,30,.28)'; g.lineWidth=1;
+  for(let b=1;b<39;b++) line3(-HW+b*(2*HW/39),NEAR,PIT);
+  // approach (before the foul line) is a darker wood
+  poly([[X(-HW,NEAR),yAt(NEAR)],[X(-HW,0),yAt(0)],[X(HW,0),yAt(0)],[X(HW,NEAR),yAt(NEAR)]],'rgba(110,60,20,.35)');
+  rect(X(-HW,0),yAt(0)-1,X(HW,0)-X(-HW,0),2,'#c02020');
+  // pin deck
+  quad(-HW,HW,L-0.35,PIT,'rgba(255,240,210,.35)');
+  // arrows and dots, drawn as tiny Christmas trees
+  for(let k=-3;k<=3;k++){ const z=4.6+Math.abs(k)*0.3, x=k*0.15; const s=sAt(z); const px=X(x,z), py=yAt(z); poly([[px,py-s*0.07],[px-s*0.035,py+s*0.02],[px+s*0.035,py+s*0.02]],'#1c7e3a'); }
+  for(let k=-2;k<=2;k++){ const z=2.1, x=k*0.18; circ(X(x,z),yAt(z),1.5,'#a02020'); }
+  // pit
+  poly([[X(-HW-GUT-0.25,PIT),yAt(PIT)],[X(HW+GUT+0.25,PIT),yAt(PIT)],[X(HW+GUT+0.25,PIT),yAt(PIT)-3],[X(-HW-GUT-0.25,PIT),yAt(PIT)-3]],'#120808');
+}
+// elf: feet at (sx, sy), s = pixels per metre
+function drawElf(p,ghost){
+  const s=sAt(p.z), sx=X(p.x,p.z), sy=yAt(p.z)-p.h*s;
+  g.save(); g.translate(sx,sy);
+  if(!p.up) g.rotate(p.rot);
+  const bob=p.up?Math.sin(p.fidget+p.i)*0.8:0;
+  const talking=bubble&&bubble.pin===p&&t<bubble.until&&((t>>3)&1);
+  // shadow
+  if(p.up||p.h<0.05){ g.fillStyle='rgba(0,0,0,.18)'; g.beginPath(); g.ellipse(0,0,10*s*0.0098,3*s*0.0098,0,0,Math.PI*2); g.fill(); }
+  const u=s*0.0088; // elves stand about half a metre tall
+  // legs: red and white stockings, curly shoes
+  rect(-5*u,-10*u,3*u,10*u,'#ffffff'); rect(2*u,-10*u,3*u,10*u,'#ffffff');
+  rect(-5*u,-8*u,3*u,2*u,'#e02828'); rect(2*u,-8*u,3*u,2*u,'#e02828'); rect(-5*u,-4*u,3*u,2*u,'#e02828'); rect(2*u,-4*u,3*u,2*u,'#e02828');
+  rect(-8*u,-2*u,6*u,2.5*u,'#2a1a10'); rect(2*u,-2*u,6*u,2.5*u,'#2a1a10'); rect(-9*u,-3.5*u,2*u,2*u,'#2a1a10'); rect(7*u,-3.5*u,2*u,2*u,'#2a1a10');
+  // tunic
+  poly([[-9*u,-10*u+bob],[9*u,-10*u+bob],[6*u,-26*u+bob],[-6*u,-26*u+bob]],'#1c9e3a');
+  for(let i=-8;i<8;i+=4) poly([[i*u,-10*u+bob],[(i+4)*u,-10*u+bob],[(i+2)*u,-13*u+bob]],'#ffdd33');
+  rect(-7*u,-18*u+bob,14*u,2.5*u,'#1a1a1a'); rect(-1.5*u,-18.5*u+bob,3*u,3.5*u,'#ffdd33');
+  // arms (waving when talking)
+  const wave=talking?-6:0;
+  rect(-10*u,(-24+wave*0.3)*u+bob,3*u,9*u,'#1c9e3a'); rect(7*u,(-24+wave)*u+bob,3*u,9*u,'#1c9e3a');
+  circ(-8.5*u,(-14.5+wave*0.3)*u+bob,1.8*u,'#ffcfa8'); circ(8.5*u,(-14.5+wave)*u+bob,1.8*u,'#ffcfa8');
+  // head with pointy ears
+  const hy=-32*u+bob;
+  poly([[-7*u,hy],[-13*u,hy-4*u],[-6*u,hy-3*u]],'#ffbf98'); poly([[7*u,hy],[13*u,hy-4*u],[6*u,hy-3*u]],'#ffbf98');
+  circ(0,hy,7*u,'#ffcfa8');
+  circ(-4*u,hy+2*u,1.6*u,'#ff9a9a'); circ(4*u,hy+2*u,1.6*u,'#ff9a9a');
+  if(p.up){ rect(-3.5*u,hy-1.5*u,1.6*u,2*u,'#1a1a1a'); rect(2*u,hy-1.5*u,1.6*u,2*u,'#1a1a1a'); }
+  else { g.strokeStyle='#1a1a1a'; g.lineWidth=Math.max(1,u*0.7); g.beginPath(); g.moveTo(-4*u,hy-2*u); g.lineTo(-2*u,hy); g.moveTo(-4*u,hy); g.lineTo(-2*u,hy-2*u); g.moveTo(2*u,hy-2*u); g.lineTo(4*u,hy); g.moveTo(2*u,hy); g.lineTo(4*u,hy-2*u); g.stroke(); }
+  if(talking||!p.up) circ(0,hy+4*u,1.8*u,'#7a1010'); else rect(-2*u,hy+3.5*u,4*u,1*u,'#7a1010');
+  // hat with a floppy tip and pom-pom
+  rect(-7.5*u,hy-6*u,15*u,3*u,'#ffffff');
+  const tip=Math.sin(p.fidget*1.3+p.i)*2;
+  poly([[-7*u,hy-6*u],[7*u,hy-6*u],[(5+tip)*u,hy-15*u],[(9+tip)*u,hy-19*u]],p.hat);
+  circ((10+tip)*u,hy-19*u,2.4*u,'#ffffff');
+  g.restore();
+}
+function drawBall(){
+  if(!ball&&state!=='position'&&state!=='aim'&&state!=='power'&&state!=='spin') return;
+  let bx,bz,bh=0;
+  if(!ball||ball.done) return; bx=ball.x; bz=ball.z;
+  const s=sAt(bz), x=X(bx,bz), y=yAt(bz)-(bh+BALL_R)*s, r=BALL_R*s;
+  if(!bh){ g.fillStyle='rgba(0,0,0,.25)'; g.beginPath(); g.ellipse(x,yAt(bz),r,r*0.3,0,0,Math.PI*2); g.fill(); }
+  // candy-cane bowling ball
+  circ(x,y,r,'#d42020');
+  g.save(); g.beginPath(); g.arc(x,y,r,0,Math.PI*2); g.clip();
+  const rot=ball?ball.rot:0;
+  for(let k=-3;k<=3;k++){ const off=((k*0.6+rot)%3.6+3.6)%3.6-1.8; g.fillStyle='#ffffff'; g.beginPath(); g.ellipse(x+off*r,y,r*0.16,r*1.2,0.5,0,Math.PI*2); g.fill(); }
+  g.restore();
+  circ(x-r*0.35,y-r*0.35,r*0.22,'rgba(255,255,255,.8)');
+}
+function drawSanta(){
+  // Santa (or Mrs. Claus) seen from behind at the foul line
+  const P=players[cur]||{name:'SANTA',suit:'#d42020'};
+  const z=-0.9, s=sAt(z), x=X(santaX,z), y=yAt(z)+6;
+  const u=s*0.0036;
+  const throwing=state==='rolling'&&rollT<30;
+  const lean=throwing?-6*u:0;
+  g.save(); g.translate(x,y);
+  g.fillStyle='rgba(0,0,0,.3)'; g.beginPath(); g.ellipse(0,0,30*u,7*u,0,0,Math.PI*2); g.fill();
+  // boots and legs
+  rect(-16*u,-18*u,12*u,18*u,P.name==='MRS. CLAUS'?'#ffffff':P.suit); rect(4*u,-18*u,12*u,18*u,P.name==='MRS. CLAUS'?'#ffffff':P.suit);
+  rect(-18*u,-6*u,15*u,7*u,'#1a1a1a'); rect(3*u,-6*u,15*u,7*u,'#1a1a1a');
+  // coat (or dress), wide and jolly
+  g.fillStyle=P.suit; g.beginPath(); g.ellipse(0,-46*u+lean,30*u,32*u,0,0,Math.PI*2); g.fill();
+  if(P.name==='MRS. CLAUS'){ poly([[-30*u,-30*u],[30*u,-30*u],[36*u,-12*u],[-36*u,-12*u]],P.suit); rect(-36*u,-15*u,72*u,5*u,'#ffffff'); }
+  else rect(-30*u,-22*u,60*u,6*u,'#ffffff');
+  rect(-30*u,-46*u+lean,60*u,6*u,'#1a1a1a');
+  // arms: right arm swings forward when throwing
+  const armY=throwing?-60*u:-58*u;
+  g.fillStyle=P.suit; g.beginPath(); g.ellipse(-28*u,-52*u+lean,8*u,18*u,0.3,0,Math.PI*2); g.fill();
+  g.beginPath(); g.ellipse(28*u,armY+lean,8*u,18*u,throwing?-0.9:-0.3,0,Math.PI*2); g.fill();
+  rect(-34*u,-38*u+lean,10*u,4*u,'#ffffff');
+  // head from behind: white hair/beard edges, hat
+  circ(0,-82*u+lean,15*u,'#ffffff');
+  if(P.name==='MRS. CLAUS'){ circ(0,-96*u+lean,8*u,'#f0f0f0'); circ(-13*u,-80*u+lean,3*u,'#ffcfa8'); circ(13*u,-80*u+lean,3*u,'#ffcfa8'); }
+  else { poly([[-15*u,-86*u+lean],[15*u,-86*u+lean],[8*u,-110*u+lean],[22*u,-118*u+lean]],'#d42020'); rect(-16*u,-90*u+lean,32*u,6*u,'#ffffff'); circ(23*u,-118*u+lean,5*u,'#ffffff'); circ(-14*u,-80*u+lean,3*u,'#ffcfa8'); circ(14*u,-80*u+lean,3*u,'#ffcfa8'); }
+  if(!ball||rollT<8){ // the candy-cane ball in Santa's right hand
+    const hx=30*u, hy=(throwing?-50:-40)*u+lean, r=12*u;
+    circ(hx,hy,r,'#d42020'); g.save(); g.beginPath(); g.arc(hx,hy,r,0,Math.PI*2); g.clip();
+    for(let k=-1;k<=1;k++){ g.fillStyle='#fff'; g.beginPath(); g.ellipse(hx+k*r*0.7,hy,r*0.16,r*1.2,0.5,0,Math.PI*2); g.fill(); } g.restore();
+    circ(hx-r*0.35,hy-r*0.35,r*0.22,'rgba(255,255,255,.8)');
+  }
+  g.restore();
+}
+function drawAimUI(){
+  if(state==='aim'||state==='power'||state==='spin'||state==='position'){
+    // dotted aiming line down the lane
+    const a=state==='position'?0:aim;
+    for(let z=0.6;z<L;z+=0.9){ const x=clamp(santaX+0.1,-HW+0.15,HW-0.15)+Math.tan(a)*z; if(Math.abs(x)>HW) break; circ(X(x,z),yAt(z),Math.max(1,sAt(z)*0.012),state==='aim'?'#ffdd33':'rgba(255,255,255,.55)'); }
+  }
+  if(state==='power'||state==='spin'){
+    // power bar on the right
+    const bx=VW-44, by=150, bh=150;
+    rect(bx-2,by-2,22,bh+4,'#000'); rect(bx,by,18,bh,'#333');
+    const pv=power; const gr=g.createLinearGradient(0,by+bh,0,by); gr.addColorStop(0,'#40ff70'); gr.addColorStop(0.6,'#ffdd33'); gr.addColorStop(1,'#ff4040');
+    g.fillStyle=gr; g.fillRect(bx,by+bh*(1-pv),18,bh*pv);
+  }
+  if(state==='spin'){
+    const cx0=VW/2, cy0=VH-22, w=150;
+    rect(cx0-w/2-2,cy0-8,w+4,16,'#000'); rect(cx0-w/2,cy0-6,w,12,'#333');
+    rect(cx0-1,cy0-8,2,16,'#ffffff');
+    rect(cx0+spin*(w/2)-3,cy0-10,6,20,'#ffdd33');
+  }
+}
+function drawSparks(){ for(const s of sparks){ const sc=sAt(s.z); rect(X(s.x,s.z),yAt(s.z)-s.h*sc,2,2,s.c); } }
+function drawSnowFront(){ for(const s of snow){ if(s.w>4.5) rect(s.x,s.y,2,2,'rgba(255,255,255,.55)'); } }
+
+/* ---------------- text overlay ---------------- */
+function txt(s,x,y,size=8,color='#FFFFFF',align='left',shadow=true){
+  cx.font=`${Math.round(size*SC)}px "Press Start 2P", "Courier New", monospace`; cx.textAlign=align; cx.textBaseline='top';
+  if(shadow){ cx.fillStyle='#000'; cx.fillText(s,Math.round((x+1)*SC),Math.round((y+1)*SC)); }
+  cx.fillStyle=color; cx.fillText(s,Math.round(x*SC),Math.round(y*SC));
+}
+function box(x,y,w,h,fill='#FFFFFF',line='#000000'){ cx.fillStyle=line; cx.fillRect(Math.round(x*SC),Math.round(y*SC),Math.round(w*SC),Math.round(h*SC)); cx.fillStyle=fill; cx.fillRect(Math.round((x+1)*SC),Math.round((y+1)*SC),Math.round((w-2)*SC),Math.round((h-2)*SC)); }
+function wrap(s,n){ const out=[]; let line=''; for(const w of s.split(' ')){ if((line+' '+w).trim().length>n){ out.push(line); line=w; } else line=(line+' '+w).trim(); } if(line) out.push(line); return out; }
+function drawScoreboard(){
+  const rows=players.length, fw=34, x0=VW/2-(fw*10+44)/2+20, y0=4, rh=17;
+  players.forEach((P,pi)=>{
+    const y=y0+pi*(rh+2), fr=frames(P.rolls);
+    box(x0-62,y,62,rh,pi===cur&&state!=='gameover'?'#ffdd33':'#e8e0d0');
+    txt(P.name.length>8?'MRS.C':P.name,x0-58,y+5,6,'#000','left',false);
+    for(let f=0;f<10;f++){
+      const fx=x0+f*fw, active=pi===cur&&f===frameNo&&state!=='gameover';
+      box(fx,y,fw,rh,active?'#fff8c0':'#ffffff');
+      const m=frameMarks(fr[f],f);
+      if(f<9){ txt(m[0]||'',fx+6,y+2,5,'#000','left',false); txt(m[1]||'',fx+fw-10,y+2,5,m[1]==='X'?'#c00000':m[1]==='/'?'#0050c0':'#000','left',false); }
+      else { m.forEach((v,k)=>txt(v,fx+3+k*10,y+2,5,v==='X'?'#c00000':v==='/'?'#0050c0':'#000','left',false)); }
+      if(fr[f].score!==null) txt(String(fr[f].score),fx+fw/2,y+10,5,'#000','center',false);
+    }
+    box(x0+10*fw,y,44,rh,'#e8e0d0'); txt(String(totalOf(P.rolls)),x0+10*fw+22,y+5,7,'#000','center',false);
+  });
+}
+
+/* ---------------- frame ---------------- */
+function draw(){
+  g.imageSmoothingEnabled=false;
+  if(state==='title'){ drawTitle(); return; }
+  drawRoom(); drawLane();
+  // elves sorted far to near, the ball between them by depth
+  const list=pins.filter(p=>!p.gone).map(p=>({z:p.z,f:()=>drawElf(p)}));
+  if(ball) list.push({z:ball.z,f:drawBall});
+  list.sort((a,b)=>b.z-a.z).forEach(o=>o.f());
+  drawSparks(); drawAimUI();
+  drawSanta(); if(!ball){ /* ball in hand drawn above Santa's hand */ }
+  drawSnowFront();
+  cx.imageSmoothingEnabled=false; cx.drawImage(lo,0,0,cv.width,cv.height);
+  // overlay text
+  const fy=yAt(PIT);
+  drawScoreboard();
+  const P=players[cur];
+  if(state!=='gameover'){ box(4,VH-40,104,30,'rgba(0,0,0,.55)','rgba(0,0,0,0)'); txt(P.name,10,VH-35,6,'#ffdd33'); txt('FRAME '+(frameNo+1)+' · BALL '+(ballNo+1),10,VH-22,5,'#ffffff'); }
+  const hints={position:coarse?'DRAG OR ◀ ▶ TO STEP, THEN BOWL':'← → TO STEP · SPACE TO AIM',aim:'SPACE TO LOCK YOUR AIM',power:'SPACE TO SET POWER',spin:'SPACE TO SET CURVE · LEFT OR RIGHT HOOK'};
+  if(hints[state]) txt(coarse?hints[state].replace(/SPACE/g,'BOWL'):hints[state],VW/2,VH-(state==='spin'?44:14),6,'#ffdd33','center');
+  if(state==='power') txt('POWER',VW-35,138,5,'#ffffff','center');
+  if(bubble&&t<bubble.until&&!bubble.pin.gone){
+    const p=bubble.pin, s=sAt(p.z), bx=X(p.x,p.z), by=yAt(p.z)-p.h*s-55*s*0.0098;
+    cx.font=`${Math.round(5*SC)}px "Press Start 2P", "Courier New", monospace`;
+    const maxW=180, words=bubble.msg.split(' '), lines=[]; let line='';
+    for(const w of words){ const tryL=(line+' '+w).trim(); if(cx.measureText(tryL).width/SC>maxW&&line){ lines.push(line); line=w; } else line=tryL; } if(line) lines.push(line);
+    const w=Math.max(...lines.map(l=>cx.measureText(l).width/SC))+14, h=lines.length*9+8;
+    let x=clamp(bx-w/2,4,VW-w-4), y=Math.max(players.length*19+8,by-h-10);
+    box(x,y,w,h,'#ffffff','#000000');
+    lines.forEach((l,i)=>txt(l,x+7,y+5+i*9,5,'#000000','left',false));
+    if(by-4>y+h){ const tx=clamp(bx,x+8,x+w-8); cx.fillStyle='#ffffff'; cx.beginPath(); cx.moveTo((tx-4)*SC,(y+h-1)*SC); cx.lineTo(bx*SC,(by-4)*SC); cx.lineTo((tx+4)*SC,(y+h-1)*SC); cx.fill(); }
+  }
+  if(banner&&t<banner.until){ const sz=banner.txt.length>9?14:20; txt(banner.txt,VW/2,150,sz,banner.c,'center'); }
+  if(state==='gameover') drawGameOver();
+  if(toast&&t<toast.until) txt('♪ '+toast.msg,VW-6,VH-12,5,'#ffdd33','right');
+}
+function drawTitle(){
+  const gr=g.createLinearGradient(0,0,0,VH); gr.addColorStop(0,'#0b0d2e'); gr.addColorStop(1,'#2a1a3e'); g.fillStyle=gr; g.fillRect(0,0,VW,VH);
+  for(const s of snow) rect(s.x,s.y,s.w>4?2:1,s.w>4?2:1,'#ffffff');
+  rect(0,VH-70,VW,70,'#e8eef8'); rect(0,VH-70,VW,3,'#ffffff');
+  // a line of elves on the snow
+  for(let i=0;i<7;i++){ const p={x:0,z:0,h:0,up:true,rot:0,fidget:t*0.05+i,i,hat:HATS[i]};
+    g.save(); g.translate(60+i*58,VH-62+Math.sin(t*0.08+i)*3); g.scale(1.2,1.2); drawElfAt(p); g.restore(); }
+  // the candy cane ball rolling across
+  const bx=((t*2)%(VW+80))-40; circ(bx,VH-38,14,'#d42020'); for(let k=-1;k<=1;k++) { g.fillStyle='#fff'; g.beginPath(); g.ellipse(bx+k*8+Math.sin(t*0.2)*3,VH-38,2.5,13,0.5,0,Math.PI*2); g.fill(); }
+  cx.imageSmoothingEnabled=false; cx.drawImage(lo,0,0,cv.width,cv.height);
+  txt("SANTA'S",VW/2,26,18,'#ff4040','center'); txt('ELF STRIKE',VW/2,54,22,'#40ff70','center');
+  txt('TEN ELVES. ONE BALL. NO MERCY.',VW/2,92,6,'#ffffff','center');
+  const one=nPlayers===1;
+  box(VW/2-150,140,140,40,one?'#ffdd33':'#3a2a4e','#000'); box(VW/2+10,140,140,40,!one?'#ffdd33':'#3a2a4e','#000');
+  txt('1 PLAYER',VW/2-80,148,8,one?'#000':'#fff','center',false); txt('SANTA',VW/2-80,164,5,one?'#000':'#ccc','center',false);
+  txt('2 PLAYERS',VW/2+80,148,8,!one?'#000':'#fff','center',false); txt('SANTA VS MRS. CLAUS',VW/2+80,164,5,!one?'#000':'#ccc','center',false);
+  if((t>>5)&1) txt(coarse?'TAP A MODE, THEN BOWL':'← → PICK · SPACE TO PLAY',VW/2,196,7,'#ff55ff','center');
+  if(save.best) txt('BEST SCORE '+save.best,VW/2,214,6,'#ffdd33','center');
+  if(!coarse) txt('M: MUSIC',VW/2,228,5,'#aaaaaa','center');
+  if(toast&&t<toast.until) txt('♪ '+toast.msg,VW-6,VH-12,5,'#000','right',false);
+}
+function drawElfAt(p){
+  // draws an elf at the current transform origin at a fixed size (title screen)
+  const fake={...p}; const s=95;
+  // reuse the lane elf by temporarily placing it at a depth that gives this scale
+  const z=S0/s-D; fake.z=z; fake.x=0; fake.h=0;
+  g.save(); g.translate(-X(0,z),-yAt(z)); drawElf(fake); g.restore();
+}
+function drawGameOver(){
+  cx.fillStyle='rgba(0,0,20,.6)'; cx.fillRect(0,0,cv.width,cv.height);
+  const totals=players.map(p=>totalOf(p.rolls));
+  let head='GAME OVER!';
+  if(players.length===2) head=totals[0]===totals[1]?"IT'S A TIE!":(totals[0]>totals[1]?'SANTA WINS!':'MRS. CLAUS WINS!');
+  txt(head,VW/2,110,16,'#ffdd33','center');
+  players.forEach((P,i)=>txt(P.name+'  '+totals[i],VW/2,146+i*18,9,'#ffffff','center'));
+  const best=Math.max(...totals);
+  const quip=best>=200?'THE ELVES ARE FILING A COMPLAINT.':best>=120?'THE ELVES ARE IMPRESSED. DON\'T TELL THEM WE SAID SO.':best>=60?'NOT BAD! THE ELVES ARE STILL GIGGLING THOUGH.':'THE ELVES SAY: SEE YOU NEXT CHRISTMAS, SLOWPOKE!';
+  txt(quip,VW/2,186+players.length*10,5,'#55ffff','center');
+  if(phaseT>60&&(t>>5)&1) txt(coarse?'TAP TO PLAY AGAIN':'SPACE TO PLAY AGAIN',VW/2,226+players.length*10,7,'#ff55ff','center');
+}
+
+/* ---------------- sizing and loop ---------------- */
+function resize(){
+  const app=document.getElementById('app'), r=app.getBoundingClientRect();
+  let cw=r.width, ch=cw*VH/VW; if(ch>r.height){ ch=r.height; cw=ch*VW/VH; }
+  cv.style.width=cw+'px'; cv.style.height=ch+'px';
+  const dpr=Math.min(3,window.devicePixelRatio||1); cv.width=Math.round(cw*dpr); cv.height=Math.round(ch*dpr); SC=cv.height/VH;
+}
+addEventListener('resize',resize); resize();
+if(document.fonts&&document.fonts.load) document.fonts.load('8px "Press Start 2P"').catch(()=>{});
+document.addEventListener('visibilitychange',()=>{ if(document.hidden){ setMusic(null); stopRumble(); } });
+let acc=0, last=performance.now();
+function frame(now){ acc+=Math.min(100,now-last); last=now; while(acc>=1000/60){ step(); acc-=1000/60; } draw(); requestAnimationFrame(frame); }
+requestAnimationFrame(frame);
+})();
+if('serviceWorker' in navigator)
+  window.addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));
+</script>
+
+</body>
+</html>

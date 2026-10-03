@@ -1,0 +1,16 @@
+{
+  "name": "Santa's Elf Strike",
+  "short_name": "Elf Strike",
+  "description": "Ten-pin bowling against a rack of wisecracking elves. One or two players.",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "fullscreen",
+  "orientation": "landscape",
+  "background_color": "#0b0d1e",
+  "theme_color": "#0b0d1e",
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
